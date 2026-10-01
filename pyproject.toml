@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nanoping-api"
+version = "11.1.0.dev0"
+description = "Typed client for the NanoPing REST API"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "LicenseRef-Proprietary"
+dependencies = [
+    "httpx>=0.27",
+    "websockets>=14",
+]
+classifiers = [
+    "Framework :: AsyncIO",
+    "Programming Language :: Python :: 3",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://nanoping.com"
+Documentation = "https://docs.nanoping.com/api/reference"
+Source = "https://github.com/nanoping-labs/nanoping-api-python"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nanoping_api"]
+
+[tool.mypy]
+strict = true
