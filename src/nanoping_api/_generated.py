@@ -106,6 +106,12 @@ __all__ = [
     "Int64Metric",
     "Kind",
     "Kpi",
+    "KpiFieldHistory",
+    "KpiHistory",
+    "KpiHistoryBucket",
+    "KpiHistoryPoint",
+    "KpiHistorySpan",
+    "KpiHistoryValueCount",
     "Level",
     "LogFileChunk",
     "LogStreamMessages",
@@ -1150,7 +1156,10 @@ class Network:
     Example: `{ "raft_timeout": 9000, "loss_emulation_percentage": 1 }`
     """
     relay_node_id: str = ""
-    """The node ID of the relay node. Must be the node that has networks enabled."""
+    """The node ID of the relay node. On a hub of your own it must be the node that
+    keeps the networks. On the cloud hub it can be any node on the hub, and is empty
+    until one is chosen. Once set, it cannot be cleared.
+    """
     nodes: list[NetworksNode] = dataclasses.field(default_factory=list)
     """The nodes in the network, each with its assigned IP address and carriers."""
 
@@ -1614,6 +1623,105 @@ class Kpi:
 
 
 @dataclasses.dataclass(kw_only=True)
+class KpiFieldHistory:
+    """The history of one field of a KPI."""
+
+    id: str = ""
+    """ID of the KPI."""
+    field: str = ""
+    """Path of the KPI field, such as `expression`. The history of a Value To Text
+    Conditions KPI has the field `condition`, with the index of the first condition
+    that held, or none when none did.
+    """
+    buckets: list[KpiHistoryBucket] = dataclasses.field(default_factory=list)
+    """The numbers the field was evaluated to, per bucket, oldest first. Buckets without
+    any are left out.
+    """
+    spans: list[KpiHistorySpan] = dataclasses.field(default_factory=list)
+    """The values that are not numbers, such as text, true or false, none and errors,
+    oldest first. The values of a KPI shown as text are all spans, numbers too.
+    """
+
+
+@dataclasses.dataclass(kw_only=True)
+class KpiHistory:
+    """The KPI history of a pipeline run, split into buckets of time."""
+
+    bucket_width_ms: int = 0
+    """How long each bucket is, in milliseconds. Buckets start at multiples of it,
+    counted from 1970.
+    """
+    poll_interval_ms: int = 0
+    """How often the KPIs were evaluated, in milliseconds."""
+    fields: list[KpiFieldHistory] = dataclasses.field(default_factory=list)
+    """The history of each KPI field."""
+
+
+@dataclasses.dataclass(kw_only=True)
+class KpiHistoryBucket:
+    """The numbers a KPI field was evaluated to within one bucket."""
+
+    start: datetime.datetime | None = None
+    """When the bucket starts."""
+    count: int = 0
+    """How many numbers the bucket holds."""
+    sum: float = 0.0
+    """The sum of the numbers, for their average."""
+    min: KpiHistoryPoint = dataclasses.field(default_factory=lambda: KpiHistoryPoint())
+    """The lowest number."""
+    max: KpiHistoryPoint = dataclasses.field(default_factory=lambda: KpiHistoryPoint())
+    """The highest number."""
+    first: KpiHistoryPoint = dataclasses.field(default_factory=lambda: KpiHistoryPoint())
+    """The first number."""
+    last: KpiHistoryPoint = dataclasses.field(default_factory=lambda: KpiHistoryPoint())
+    """The last number."""
+
+
+@dataclasses.dataclass(kw_only=True)
+class KpiHistoryPoint:
+    """A number a KPI field was evaluated to."""
+
+    time: datetime.datetime | None = None
+    """When it was evaluated."""
+    value: float = 0.0
+    """The number."""
+
+
+@dataclasses.dataclass(kw_only=True)
+class KpiHistorySpan:
+    """A stretch of time over which a KPI field was evaluated to values other than
+    numbers, or to the values of a KPI shown as text.
+    """
+
+    start: datetime.datetime | None = None
+    """When the span starts."""
+    end: datetime.datetime | None = None
+    """When the last value of the span stopped holding, one poll interval after it was
+    evaluated.
+    """
+    value: Kpi = dataclasses.field(default_factory=lambda: Kpi())
+    """The value over the whole span, when it did not change. Its id and field are left
+    empty.
+    """
+    counts: list[KpiHistoryValueCount] = dataclasses.field(default_factory=list)
+    """When the value changed within the span: how many times each value was evaluated,
+    in the order they first came up.
+    """
+    changes: int = 0
+    """How many times the value changed within the span."""
+
+
+@dataclasses.dataclass(kw_only=True)
+class KpiHistoryValueCount:
+    """How many times a KPI field was evaluated to a value within a span."""
+
+    value: Kpi = dataclasses.field(default_factory=lambda: Kpi())
+    """The value. Its id and field are left empty."""
+    count: int = 0
+    """How many times it was evaluated."""
+
+
+@dataclasses.dataclass(kw_only=True)
 class LogStreamMessages:
     """A batch of log messages from a pipeline run."""
 
@@ -1643,6 +1751,21 @@ class OpenTelemetryStreamRequest:
     """ID of the node that hosts the run."""
     run_id: str = ""
     """ID of the run to stream telemetry from."""
+    include_kpi_history: bool = False
+    """Send the KPIs the node has recorded for the run before the live telemetry, split
+    into buckets of time. The node keeps them for 24 hours by default, or as long as
+    `pipelines.kpiHistoryRetentionMinutes` says. A run that has stopped only has its
+    history sent.
+    """
+    kpi_history_start: datetime.datetime | None = None
+    """From when to send the KPI history. Unset starts with the oldest the node keeps.
+    """
+    kpi_history_end: datetime.datetime | None = None
+    """Until when to send the KPI history. Unset goes on to the latest."""
+    kpi_history_max_buckets: int = 0
+    """The most buckets to split the KPI history into. 0 uses the default of 600, and
+    more than 10000 are not sent.
+    """
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -1831,6 +1954,16 @@ class TelemetrySample:
     """The KPI values of the run."""
     timestamp: datetime.datetime | None = None
     """When the sample was taken."""
+    kpi_history: KpiHistory = dataclasses.field(default_factory=lambda: KpiHistory())
+    """A part of the KPI history of the run, when it was asked for. The history is sent
+    in parts before the live samples, in samples with no metrics, KPIs or timestamp.
+    A field can be split over parts, and its buckets and spans then carry on in the
+    next part. The live samples leave out the KPIs the history already holds.
+    """
+    kpi_history_complete: bool = False
+    """Set on the last part of the KPI history. Live samples follow it. Sent with an
+    empty history when the run has none.
+    """
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -1959,8 +2092,8 @@ class BlueprintsClient:
     node. Every network uses three blueprints: one for the relay node, one the relay
     runs for every client, and one for every client node. The built-in blueprints are
     read-only; create your own to change how networks carry traffic. Blueprints are
-    stored on the connected node that has networks enabled, and calls wait until that
-    node is connected.
+    kept by the hub's network service, which keeps its networks, and calls wait until
+    it is connected.
     """
 
     def __init__(self, transport: Transport) -> None:
@@ -2534,8 +2667,10 @@ class NetworksClient:
     relay node. When a network is created or changed, the pipelines each node needs
     are generated from the network's blueprints and deployed automatically. Use this
     service to create and change networks and to follow their changes and logs.
-    Networks are stored on the connected node that has networks enabled, and calls
-    wait until that node is connected.
+    Networks are kept by the hub's network service: on the cloud hub its own, under
+    the node ID `networks`, and on a hub of your own the node that has networks
+    enabled (the one with the lowest ID if several do). Calls wait until it is
+    connected.
     """
 
     def __init__(self, transport: Transport) -> None:
@@ -2977,20 +3112,45 @@ class PipelinesServiceClient:
         *,
         node_id: str = "",
         run_id: str = "",
+        include_kpi_history: bool = False,
+        kpi_history_start: datetime.datetime | None = None,
+        kpi_history_end: datetime.datetime | None = None,
+        kpi_history_max_buckets: int = 0,
     ) -> ServerStream[TelemetrySample]:
         """Streams telemetry samples (metrics and KPI values) of a pipeline run at
-        regular intervals while the run is active. The stream ends with an error when
-        the run stops, when the run is unknown, or when the node disconnects.
+        regular intervals while the run is active. When the KPI history is asked for,
+        the KPIs the node has recorded for the run are sent first, oldest first, in
+        samples that hold only history, and the last of them is marked complete. The
+        stream ends with an error when the run stops, when the run is unknown, or
+        when the node disconnects.
 
         Args:
             node_id: ID of the node that hosts the run.
             run_id: ID of the run to stream telemetry from.
+            include_kpi_history: Send the KPIs the node has recorded for the run
+                before the live telemetry, split into buckets of time. The node keeps
+                them for 24 hours by default, or as long as
+                `pipelines.kpiHistoryRetentionMinutes` says. A run that has stopped only
+                has its history sent.
+            kpi_history_start: From when to send the KPI history. Unset starts with
+                the oldest the node keeps.
+            kpi_history_end: Until when to send the KPI history. Unset goes on to
+                the latest.
+            kpi_history_max_buckets: The most buckets to split the KPI history into.
+                0 uses the default of 600, and more than 10000 are not sent.
         """
         return self._transport.server_stream(
             [
                 Route("GET", "/v1/streams/nodes/{node_id}/pipeline-runs/{run_id}/telemetry", ""),
             ],
-            OpenTelemetryStreamRequest(node_id=node_id, run_id=run_id),
+            OpenTelemetryStreamRequest(
+                node_id=node_id,
+                run_id=run_id,
+                include_kpi_history=include_kpi_history,
+                kpi_history_start=kpi_history_start,
+                kpi_history_end=kpi_history_end,
+                kpi_history_max_buckets=kpi_history_max_buckets,
+            ),
             TelemetrySample,
         )
 
@@ -3050,8 +3210,8 @@ class AsyncBlueprintsClient:
     node. Every network uses three blueprints: one for the relay node, one the relay
     runs for every client, and one for every client node. The built-in blueprints are
     read-only; create your own to change how networks carry traffic. Blueprints are
-    stored on the connected node that has networks enabled, and calls wait until that
-    node is connected.
+    kept by the hub's network service, which keeps its networks, and calls wait until
+    it is connected.
     """
 
     def __init__(self, transport: AsyncTransport) -> None:
@@ -3627,8 +3787,10 @@ class AsyncNetworksClient:
     relay node. When a network is created or changed, the pipelines each node needs
     are generated from the network's blueprints and deployed automatically. Use this
     service to create and change networks and to follow their changes and logs.
-    Networks are stored on the connected node that has networks enabled, and calls
-    wait until that node is connected.
+    Networks are kept by the hub's network service: on the cloud hub its own, under
+    the node ID `networks`, and on a hub of your own the node that has networks
+    enabled (the one with the lowest ID if several do). Calls wait until it is
+    connected.
     """
 
     def __init__(self, transport: AsyncTransport) -> None:
@@ -4070,20 +4232,45 @@ class AsyncPipelinesServiceClient:
         *,
         node_id: str = "",
         run_id: str = "",
+        include_kpi_history: bool = False,
+        kpi_history_start: datetime.datetime | None = None,
+        kpi_history_end: datetime.datetime | None = None,
+        kpi_history_max_buckets: int = 0,
     ) -> AsyncServerStream[TelemetrySample]:
         """Streams telemetry samples (metrics and KPI values) of a pipeline run at
-        regular intervals while the run is active. The stream ends with an error when
-        the run stops, when the run is unknown, or when the node disconnects.
+        regular intervals while the run is active. When the KPI history is asked for,
+        the KPIs the node has recorded for the run are sent first, oldest first, in
+        samples that hold only history, and the last of them is marked complete. The
+        stream ends with an error when the run stops, when the run is unknown, or
+        when the node disconnects.
 
         Args:
             node_id: ID of the node that hosts the run.
             run_id: ID of the run to stream telemetry from.
+            include_kpi_history: Send the KPIs the node has recorded for the run
+                before the live telemetry, split into buckets of time. The node keeps
+                them for 24 hours by default, or as long as
+                `pipelines.kpiHistoryRetentionMinutes` says. A run that has stopped only
+                has its history sent.
+            kpi_history_start: From when to send the KPI history. Unset starts with
+                the oldest the node keeps.
+            kpi_history_end: Until when to send the KPI history. Unset goes on to
+                the latest.
+            kpi_history_max_buckets: The most buckets to split the KPI history into.
+                0 uses the default of 600, and more than 10000 are not sent.
         """
         return self._transport.server_stream(
             [
                 Route("GET", "/v1/streams/nodes/{node_id}/pipeline-runs/{run_id}/telemetry", ""),
             ],
-            OpenTelemetryStreamRequest(node_id=node_id, run_id=run_id),
+            OpenTelemetryStreamRequest(
+                node_id=node_id,
+                run_id=run_id,
+                include_kpi_history=include_kpi_history,
+                kpi_history_start=kpi_history_start,
+                kpi_history_end=kpi_history_end,
+                kpi_history_max_buckets=kpi_history_max_buckets,
+            ),
             TelemetrySample,
         )
 

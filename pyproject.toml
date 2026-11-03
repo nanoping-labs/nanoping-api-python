@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "nanoping-api"
-version = "11.1.0.dev0"
+version = "12.0.0"
 description = "Typed client for the NanoPing REST API"
 readme = "README.md"
 requires-python = ">=3.11"
